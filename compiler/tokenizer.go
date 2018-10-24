@@ -7,7 +7,10 @@ import (
 )
 
 type Tokenizer struct {
-	r io.ByteScanner
+	r       io.ByteScanner
+	column  int
+	line    int
+	current locatableByte
 }
 
 type TokenType uint8
@@ -16,7 +19,8 @@ const (
 	Delimiter TokenType = iota
 	Identifier
 	StringLiteral
-	NumberLiteral
+	IntegerLiteral
+	FloatLiteral
 	BoolLiteral
 )
 
@@ -28,8 +32,10 @@ func (t TokenType) String() string {
 		return "Identifier"
 	case StringLiteral:
 		return "String"
-	case NumberLiteral:
-		return "Number"
+	case IntegerLiteral:
+		return "Integer"
+	case FloatLiteral:
+		return "Float"
 	case BoolLiteral:
 		return "Bool"
 	default:
@@ -40,103 +46,39 @@ func (t TokenType) String() string {
 type Token struct {
 	tokenType TokenType
 	value     interface{}
+	line      int
+	col       int
 }
 
 func (t *Token) String() string {
 	return fmt.Sprintf("%s %v", t.tokenType, t.value)
 }
 
-func isLetter(b byte) bool {
-	return b == byte('a') ||
-		b == byte('b') ||
-		b == byte('c') ||
-		b == byte('d') ||
-		b == byte('e') ||
-		b == byte('f') ||
-		b == byte('g') ||
-		b == byte('h') ||
-		b == byte('i') ||
-		b == byte('j') ||
-		b == byte('k') ||
-		b == byte('l') ||
-		b == byte('m') ||
-		b == byte('n') ||
-		b == byte('o') ||
-		b == byte('p') ||
-		b == byte('q') ||
-		b == byte('r') ||
-		b == byte('s') ||
-		b == byte('t') ||
-		b == byte('u') ||
-		b == byte('v') ||
-		b == byte('w') ||
-		b == byte('x') ||
-		b == byte('y') ||
-		b == byte('z')
-}
-
-func isNumber(b byte) bool {
-	return b == byte('0') ||
-		b == byte('1') ||
-		b == byte('2') ||
-		b == byte('3') ||
-		b == byte('4') ||
-		b == byte('5') ||
-		b == byte('6') ||
-		b == byte('7') ||
-		b == byte('8') ||
-		b == byte('9')
-}
-
-func getNumberValue(b byte) int {
-	switch b {
-	case byte('0'):
-		return 0
-	case byte('1'):
-		return 1
-	case byte('2'):
-		return 2
-	case byte('3'):
-		return 3
-	case byte('4'):
-		return 4
-	case byte('5'):
-		return 5
-	case byte('6'):
-		return 6
-	case byte('7'):
-		return 7
-	case byte('8'):
-		return 8
-	case byte('9'):
-		return 9
-	default:
-		return -1
-	}
-}
-
-func isAlphaNum(b byte) bool {
-	return isNumber(b) || isLetter(b)
-}
-
 func readString(t *Tokenizer) (*Token, error) {
 	str := []byte{}
+	line := -1
+	col := -1
 
 	for {
-		b, err := t.r.ReadByte()
+		b, err := t.ReadByte()
 		if err != nil {
 			return nil, err
+		}
+		if line == -1 || col == -1 {
+			line, col = t.line, t.col
 		}
 
 		if b == byte('"') {
 			return &Token{
 				tokenType: StringLiteral,
 				value:     string(str),
+				line:      line,
+				col:       col,
 			}, nil
 		}
 
 		if b == byte('\\') {
-			n, err := t.r.ReadByte()
+			n, err := t.ReadByte()
 			if err != nil {
 				return nil, err
 			}
@@ -162,10 +104,11 @@ func readString(t *Tokenizer) (*Token, error) {
 }
 
 func readIdent(t *Tokenizer) (*Token, error) {
-	b, err := t.r.ReadByte()
+	b, err := t.ReadByte()
 	if err != nil {
 		return nil, err
 	}
+	line, col := t.line, t.col
 
 	if !isLetter(b) {
 		return nil, errors.New("Unexpected character")
@@ -174,7 +117,7 @@ func readIdent(t *Tokenizer) (*Token, error) {
 	ident := []byte{b}
 
 	for {
-		b, err = t.r.ReadByte()
+		b, err = t.ReadByte()
 		if err != err {
 			return nil, err
 		}
@@ -184,6 +127,8 @@ func readIdent(t *Tokenizer) (*Token, error) {
 			return &Token{
 				tokenType: Identifier,
 				value:     string(ident),
+				line:      line,
+				col:       col,
 			}, err
 		}
 
@@ -193,32 +138,72 @@ func readIdent(t *Tokenizer) (*Token, error) {
 
 func readNumber(t *Tokenizer) (*Token, error) {
 	value := 0
+	line, col := -1, -1
 
 	for {
-		b, err := t.r.ReadByte()
+		b, err := t.ReadByte()
 		if err != nil {
 			return nil, err
+		}
+		if line == -1 || col == -1 {
+			line, col = t.line, t.col
 		}
 
 		switch true {
 		case isNumber(b):
 			value *= 10
 			value += getNumberValue(b)
+		case b == byte('.'):
+			// decimal
 		default:
 			err := t.r.UnreadByte()
 			if err != nil {
 				return nil, err
 			}
 			return &Token{
-				tokenType: NumberLiteral,
+				tokenType: IntegerLiteral,
 				value:     value,
 			}, nil
 		}
 	}
 }
 
-func (t *Tokenizer) ReadToken() (*Token, error) {
+func (t *Tokenizer) ReadByte() (locatableByte, error) {
 	b, err := t.r.ReadByte()
+	if err != nil {
+		return b, err
+	}
+
+	lb := locatableByte{
+		value:  b,
+		line:   t.line,
+		column: t.column,
+	}
+
+	defer func() { t.current = lb }()
+
+	if t.current == byte('\n') {
+		t.column = 0
+		t.line++
+		return lb, nil
+	}
+
+	t.col++
+	return b, err
+}
+
+func (t *Tokenizer) UnreadByte() error {
+	err := t.r.UnreadByte()
+	if err != nil {
+		return err
+	}
+
+	t.col--
+	return nil
+}
+
+func (t *Tokenizer) ReadToken() (*Token, error) {
+	b, err := t.ReadByte()
 	if err != nil {
 		return nil, err
 	}
@@ -228,6 +213,8 @@ func (t *Tokenizer) ReadToken() (*Token, error) {
 		return &Token{
 			tokenType: Delimiter,
 			value:     string([]byte{b}),
+			line:      t.line,
+			col:       t.col,
 		}, nil
 
 	case byte(' '), byte('\t'), byte('\n'), byte('\r'):

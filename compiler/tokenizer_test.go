@@ -7,12 +7,21 @@ import (
 )
 
 func TestCompiler(t *testing.T) {
-	test := []byte("(print \"hello world\" 99)")
+	program := `
+	  (print
+		  "hello world"
+			99
+			123.45
+		)`
+	test := []byte(program)
 
 	r := bytes.NewReader(test)
 
 	tokenizer := &Tokenizer{
 		r,
+		0,
+		0,
+		0,
 	}
 
 	for {
@@ -21,6 +30,6 @@ func TestCompiler(t *testing.T) {
 			log.Fatal(err)
 		}
 
-		log.Print(token)
+		log.Printf("%d:%d %v", tokenizer.line, tokenizer.col, token.String())
 	}
 }
